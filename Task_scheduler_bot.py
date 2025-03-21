@@ -76,7 +76,7 @@ def process_task_input(message):
         bot.send_message(
             message.chat.id,
             "❌ Неверный формат! Используйте:\n"
-            "Текст задачи / ГГГГ-ММ-ДД ЧЧ:ММ"
+            "Текст задачи / Год-месяц-число часы:минуты"
         )
     except Exception as e:
         bot.send_message(
@@ -177,21 +177,35 @@ def edit_task_prompt(message):
 def process_edit_id(message):
     try:
         task_id = ObjectId(message.text.strip())
-        msg = bot.send_message(message.chat.id, "Введите новый текст задачи:")
+        msg = bot.send_message(message.chat.id, "✏️ Изменить задачу: \nФормат: Новый текст задачи / # \n\n📅 Изменить дедлайн: \nФормат: # /  Новый дедлайн (Год-месяц-число) \n\n🆕 Изменить задачи и дедлайн: \nФормат: Новый текст задачи / новый дедлайн")
         bot.register_next_step_handler(msg, lambda m: process_edit_text(m, task_id))
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Ошибка: Некорректный ID задачи")
 
 def process_edit_text(message, task_id):
     try:
-        new_text = message.text.strip()
-        result = tasks_collection.update_one(
-            {'_id': task_id, 'user_id': message.chat.id},
-            {'$set': {'text': new_text}}
-        )
-        
+        # new_text = message.text.strip()
+        new_text, new_deadline_str = message.text.split(' / ', 1)
+        if new_text == "#":
+            deadline = parser.parse(new_deadline_str)  # Парсим дату из строки
+            result = tasks_collection.update_one(
+                {'_id': task_id, 'user_id': message.chat.id},
+                {'$set': {'deadline': deadline}}
+            )
+        elif new_deadline_str == "#":
+            result = tasks_collection.update_one(
+                {'_id': task_id, 'user_id': message.chat.id},
+                {'$set': {'text': new_text}}
+            )
+        else:
+            result = tasks_collection.update_one(
+                {'_id': task_id, 'user_id': message.chat.id},
+                {'$set': {'deadline': deadline}},
+                {'$set': {'text' : new_text}}
+            )
+
         if result.modified_count > 0:
-            bot.send_message(message.chat.id, "✅ Текст задачи успешно обновлен!")
+            bot.send_message(message.chat.id, "✅ Задача успешно обновлена!")
         else:
             bot.send_message(message.chat.id, "❌ Задача не найдена или нет прав для редактирования")
             
@@ -229,7 +243,7 @@ def process_toggle_status(message):
 def delete_task(message):
     msg = bot.send_message(
         message.chat.id,
-        "Введите дату для удаления задач (ГГГГ-ММ-ДД):"
+        "Введите дату для удаления задач (Год-месяц-число):"
     )
     bot.register_next_step_handler(msg, process_delete_input)
 
@@ -252,7 +266,7 @@ def process_delete_input(message):
     except ValueError:
         bot.send_message(
             message.chat.id,
-            "❌ Неверный формат даты! Используйте ГГГГ-ММ-ДД."
+            "❌ Неверный формат даты! Используйте Год-месяц-число."
         )
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
