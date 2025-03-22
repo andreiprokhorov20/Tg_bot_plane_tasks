@@ -76,38 +76,96 @@ def process_task_input(message):
         bot.send_message(
             message.chat.id,
             "❌ Неверный формат! Используйте:\n"
-            "Текст задачи / ГГГГ-ММ-ДД ЧЧ:ММ"
+            "Текст задачи / Год-месяц-число часы:минуты"
         )
     except Exception as e:
         bot.send_message(
             message.chat.id,
             f"❌ Ошибка: {str(e)}"
         )
+
 @bot.message_handler(func=lambda message: message.text == '📝 Список задач')
 def show_tasks(message):
     try:
-        # Получаем задачи только для текущего пользователя
-        tasks = list(tasks_collection.find(
-            {'user_id': message.chat.id},
-            sort=[('deadline', 1)]  # Сортировка по дедлайну
-        ))
+        now = datetime.now()
+        tasks = list(tasks_collection.find({'user_id': message.chat.id}))
         
         if not tasks:
             bot.send_message(message.chat.id, "📭 Список задач пуст!")
             return
-            
-        response = ["Ваш список задач:\n"]
+
+        # Разделяем задачи на категории
+        overdue = []
+        completed = []
+        in_progress = []
+
         for task in tasks:
-            status = "✅ Выполнено" if task['is_completed'] else "⏳ В процессе"
-            response.append(
-                f"ID: {task['_id']}\n"
-                f"Задача: {task['text']}\n"
-                f"Дедлайн: {task['deadline'].strftime('%d.%m.%Y %H:%M')}\n"
-                f"Статус: {status}\n"
-            )
-            
-        bot.send_message(message.chat.id, "\n".join(response))
+            if task['is_completed']:
+                completed.append(task)
+            else:
+                delta = task['deadline'] - now
+                if delta.days < 0:
+                    overdue.append(task)
+                else:
+                    in_progress.append(task)
+
+        # Сортируем задачи внутри категорий
+        overdue.sort(key=lambda x: x['deadline'])
+        in_progress.sort(key=lambda x: x['deadline'])
+
+        # Формируем ответ
+        response = []
         
+        if overdue:
+            response.append("\n🔴 Просроченные задачи:")
+            for task in overdue:
+                delta = now - task['deadline']
+                response.append(
+                    f"▫️ {task['text']}\n"
+                    f"   ID: {task['_id']}\n"
+                    f"   Просрочено на: {delta.days} дней\n"
+                    f"   Исходный дедлайн: {task['deadline'].strftime('%d.%m.%Y %H:%M')}"
+                )
+                response.append("")
+
+        if completed:
+            response.append("\n🟢 Выполненные задачи:")
+            for task in completed:
+                response.append(
+                    f"▫️ {task['text']}\n"
+                    f"   ID: {task['_id']}\n"
+                    f"   Дедлайн: {task['deadline'].strftime('%d.%m.%Y %H:%M')}"
+                )
+                response.append("")
+
+        if in_progress:
+            response.append("\n🟡 Активные задачи:")
+            for task in in_progress:
+                delta = task['deadline'] - now
+                hours, remainder = divmod(delta.seconds, 3600)
+                minutes = remainder // 60
+                time_left = f"{delta.days}д {hours}ч {minutes}м"
+                
+                response.append(
+                    f"▫️ {task['text']}\n"
+                    f"   ID: {task['_id']}\n"
+                    f"   Дедлайн: {task['deadline'].strftime('%d.%m.%Y %H:%M')}\n"
+                    f"   Осталось времени: {time_left}"
+                )
+                response.append("")
+
+        if not response:
+            bot.send_message(message.chat.id, "📭 Список задач пуст!")
+            return
+
+        # Отправляем частями если сообщение слишком длинное
+        full_response = "\n".join(response)
+        if len(full_response) > 4096:
+            for x in range(0, len(full_response), 4096):
+                bot.send_message(message.chat.id, full_response[x:x+4096])
+        else:
+            bot.send_message(message.chat.id, full_response)
+
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
 
@@ -119,21 +177,35 @@ def edit_task_prompt(message):
 def process_edit_id(message):
     try:
         task_id = ObjectId(message.text.strip())
-        msg = bot.send_message(message.chat.id, "Введите новый текст задачи:")
+        msg = bot.send_message(message.chat.id, "✏️ Изменить задачу: \nФормат: Новый текст задачи / # \n\n📅 Изменить дедлайн: \nФормат: # /  Новый дедлайн (Год-месяц-число) \n\n🆕 Изменить задачи и дедлайн: \nФормат: Новый текст задачи / новый дедлайн")
         bot.register_next_step_handler(msg, lambda m: process_edit_text(m, task_id))
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Ошибка: Некорректный ID задачи")
 
 def process_edit_text(message, task_id):
     try:
-        new_text = message.text.strip()
-        result = tasks_collection.update_one(
-            {'_id': task_id, 'user_id': message.chat.id},
-            {'$set': {'text': new_text}}
-        )
-        
+        # new_text = message.text.strip()
+        new_text, new_deadline_str = message.text.split(' / ', 1)
+        if new_text == "#":
+            deadline = parser.parse(new_deadline_str)  # Парсим дату из строки
+            result = tasks_collection.update_one(
+                {'_id': task_id, 'user_id': message.chat.id},
+                {'$set': {'deadline': deadline}}
+            )
+        elif new_deadline_str == "#":
+            result = tasks_collection.update_one(
+                {'_id': task_id, 'user_id': message.chat.id},
+                {'$set': {'text': new_text}}
+            )
+        else:
+            deadline = parser.parse(new_deadline_str)  # Парсим дату из строки
+            result = tasks_collection.update_one(
+                {'_id': task_id, 'user_id': message.chat.id},
+                {'$set': {'text' : new_text, 'deadline': deadline}}
+            )
+
         if result.modified_count > 0:
-            bot.send_message(message.chat.id, "✅ Текст задачи успешно обновлен!")
+            bot.send_message(message.chat.id, "✅ Задача успешно обновлена!")
         else:
             bot.send_message(message.chat.id, "❌ Задача не найдена или нет прав для редактирования")
             
@@ -171,7 +243,7 @@ def process_toggle_status(message):
 def delete_task(message):
     msg = bot.send_message(
         message.chat.id,
-        "Введите дату для удаления задач (ГГГГ-ММ-ДД):"
+        "Введите дату для удаления задач (Год-месяц-число):"
     )
     bot.register_next_step_handler(msg, process_delete_input)
 
@@ -194,7 +266,7 @@ def process_delete_input(message):
     except ValueError:
         bot.send_message(
             message.chat.id,
-            "❌ Неверный формат даты! Используйте ГГГГ-ММ-ДД."
+            "❌ Неверный формат даты! Используйте Год-месяц-число."
         )
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
