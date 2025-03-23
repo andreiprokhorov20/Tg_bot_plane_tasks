@@ -1,9 +1,10 @@
 import telebot
 from telebot import types
 from pymongo import MongoClient
-from datetime import datetime
+from datetime import datetime, timedelta
 from dateutil import parser  # Для парсинга дат
 from bson import ObjectId
+from threading import Timer
 
 TOKEN = '7968336951:AAEEdd0gI4lV6unza548cnz19Tfo_AwmcXc'
 bot = telebot.TeleBot(TOKEN)
@@ -13,6 +14,23 @@ client = MongoClient('mongodb://localhost:27017/')  # Если БД на дру�
 db = client.task_manager  # Создаем/выбираем базу данных
 tasks_collection = db.tasks  # Коллекция для хранения задач
 
+# Удаление задач пользователя при блокировке бота
+# @bot.chat_member_handler()
+# def chat_member_update(chat_member):
+
+#     # Проверяем, что бот был заблокирован пользователем
+#     if chat_member.new_chat_member.status == 'kicked':
+#         user_id = chat_member.chat.id
+
+#         # Удаляем все задачи пользователя из базы данных
+#         result = tasks_collection.delete_many({'user_id' : user_id})
+#         print(f"Удалено {result.deleted_count} задач для пользователя {user_id}")
+
+#     elif chat_member.new_chat_member.status == 'left':
+#         user_id = chat_member.chat.id
+#         result = tasks_collection.delete_many({'user_id' : user_id})
+#         print(f"Удалено {result.deleted_count} задач для пользователя {user_id}")
+        
 @bot.message_handler(commands=['start'])
 def start(message):
     markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
@@ -47,14 +65,23 @@ def add_task(message):
     msg = bot.send_message(
         message.chat.id,
         "Введите задачу и дату в формате:\n"
-        "Купить молоко / 2024-03-20 18:00"
+        "Купить молоко / 20.03.2025 18:00"
     )
     bot.register_next_step_handler(msg, process_task_input)
     
 def process_task_input(message):
     try:
         task_text, deadline_str = message.text.split(' / ', 1)
-        deadline = parser.parse(deadline_str)  # Парсим дату из строки
+        try:
+            deadline = datetime.strptime(deadline_str, '%d.%m.%Y %H:%M') # Парсим дату из строки
+        except ValueError:
+            raise ValueError(
+                "❌ Неверный формат! Используйте:\n"
+                "Текст задачи / ДД.ММ.ГГГГ Ч:М"
+            )
+        
+        if deadline < datetime.now():
+            raise ValueError("Дата не может быть в прошлом!")
         
         # Создаем документ задачи
         task = {
@@ -72,12 +99,6 @@ def process_task_input(message):
             f"✅ Задача '{task_text}' добавлена!\nID задачи: {result.inserted_id}"
         )
         
-    except ValueError:
-        bot.send_message(
-            message.chat.id,
-            "❌ Неверный формат! Используйте:\n"
-            "Текст задачи / Год-месяц-число часы:минуты"
-        )
     except Exception as e:
         bot.send_message(
             message.chat.id,
@@ -177,7 +198,7 @@ def edit_task_prompt(message):
 def process_edit_id(message):
     try:
         task_id = ObjectId(message.text.strip())
-        msg = bot.send_message(message.chat.id, "✏️ Изменить задачу: \nФормат: Новый текст задачи / # \n\n📅 Изменить дедлайн: \nФормат: # /  Новый дедлайн (Год-месяц-число) \n\n🆕 Изменить задачи и дедлайн: \nФормат: Новый текст задачи / новый дедлайн")
+        msg = bot.send_message(message.chat.id, "✏️ Изменить задачу: \nФормат: Новый текст задачи / # \n\n📅 Изменить дедлайн: \nФормат: # /  Новый дедлайн (ДД.ММ.ГГГГ Ч:М) \n\n🆕 Изменить задачи и дедлайн: \nФормат: Новый текст задачи / новый дедлайн")
         bot.register_next_step_handler(msg, lambda m: process_edit_text(m, task_id))
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Ошибка: Некорректный ID задачи")
@@ -186,23 +207,27 @@ def process_edit_text(message, task_id):
     try:
         # new_text = message.text.strip()
         new_text, new_deadline_str = message.text.split(' / ', 1)
-        if new_text == "#":
-            deadline = parser.parse(new_deadline_str)  # Парсим дату из строки
-            result = tasks_collection.update_one(
-                {'_id': task_id, 'user_id': message.chat.id},
-                {'$set': {'deadline': deadline}}
-            )
-        elif new_deadline_str == "#":
+        deadline = parser.parse(new_deadline_str)  # Парсим дату из строки
+        if new_deadline_str == "#":
             result = tasks_collection.update_one(
                 {'_id': task_id, 'user_id': message.chat.id},
                 {'$set': {'text': new_text}}
             )
         else:
-            deadline = parser.parse(new_deadline_str)  # Парсим дату из строки
-            result = tasks_collection.update_one(
-                {'_id': task_id, 'user_id': message.chat.id},
-                {'$set': {'text' : new_text, 'deadline': deadline}}
-            )
+            deadline = datetime.strptime(new_deadline_str, '%d.%m.%Y %H:%M') # Парсим дату из строки  
+            if deadline < datetime.now():
+                raise ValueError("Дата не может быть в прошлом!")
+            if new_text == "#":
+                result = tasks_collection.update_one(
+                    {'_id': task_id, 'user_id': message.chat.id},
+                    {'$set': {'deadline': deadline}}
+                )
+            
+            else:
+                result = tasks_collection.update_one(
+                    {'_id': task_id, 'user_id': message.chat.id},
+                    {'$set': {'text' : new_text, 'deadline': deadline}}
+                )
 
         if result.modified_count > 0:
             bot.send_message(message.chat.id, "✅ Задача успешно обновлена!")
@@ -243,14 +268,14 @@ def process_toggle_status(message):
 def delete_task(message):
     msg = bot.send_message(
         message.chat.id,
-        "Введите дату для удаления задач (Год-месяц-число):"
+        "Введите дату для удаления задач (ДД.ММ.ГГГГ):"
     )
     bot.register_next_step_handler(msg, process_delete_input)
 
 def process_delete_input(message):
     try:
         date_str = message.text.strip()
-        date = datetime.strptime(date_str, '%Y-%m-%d')
+        date = datetime.strptime(date_str, '%d.%m.%Y')
         
         # Удаляем задачи по дате и user_id
         result = tasks_collection.delete_many({
@@ -266,9 +291,31 @@ def process_delete_input(message):
     except ValueError:
         bot.send_message(
             message.chat.id,
-            "❌ Неверный формат даты! Используйте Год-месяц-число."
+            "❌ Неверный формат даты! Используйте: День-Месяц-Год."
         )
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
+
+def prolong_deadlines():
+    now = datetime.now()
+    overdue_tasks = tasks_collection.find({'deadline' : {'$lt' : now}, 'is_completed' : False})
+
+    # Продлеваем срок задачи на 1 день
+    for task in overdue_tasks:
+        new_deadline = task['deadline'] + timedelta(days = 1)
+        tasks_collection.update_one(
+            {'_id' : task['_id']},
+            {'$set' : {'deadline' : new_deadline}}
+        )
+        # Уведомляем пользователя
+        bot.send_message(
+            task['user_id'],
+            f"⏳ Срок задачи '{task['text']}' истек. Дедлайн был автоматически продлен на 1 день.\n"
+            f"Новый дедлайн: {new_deadline.strftime('%d.%m.%Y %H:%M')}"
+        )
+    # Запускаем проверку снова через 1 час
+    Timer(60, prolong_deadlines).start()
+# Запускаем проверку при старте бота
+prolong_deadlines()
 
 bot.polling()
