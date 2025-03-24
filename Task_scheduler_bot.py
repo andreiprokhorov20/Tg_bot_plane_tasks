@@ -10,8 +10,8 @@ TOKEN = '7968336951:AAEEdd0gI4lV6unza548cnz19Tfo_AwmcXc'
 bot = telebot.TeleBot(TOKEN)
 
 # Подключение к MongoDB
-client = MongoClient('mongodb://localhost:27017/')  # Если БД на другом сервере - укажите свой URL
-db = client.task_manager  # Создаем/выбираем базу данных
+client = MongoClient('mongodb://localhost:27017/')
+db = client.task_manager_3  # Создаем/выбираем базу данных
 tasks_collection = db.tasks  # Коллекция для хранения задач
 
 # Удаление задач пользователя при блокировке бота
@@ -60,12 +60,13 @@ def start(message):
         reply_markup=markup
     )
 
+# Функция добавления задачи
 @bot.message_handler(func=lambda message: message.text == '➕ Добавить задачу')
 def add_task(message):
     msg = bot.send_message(
         message.chat.id,
         "Введите задачу и дату в формате:\n"
-        "Купить молоко / 20.03.2025 18:00"
+        "Сходить в магазин / 25.03.2025 18:00"
     )
     bot.register_next_step_handler(msg, process_task_input)
     
@@ -89,7 +90,8 @@ def process_task_input(message):
             'text': task_text,
             'deadline': deadline,
             'created_at': datetime.now(),
-            'is_completed': False
+            'is_completed': False,
+            'is_prolonged': False
         }
         
         # Вставляем задачу в коллекцию
@@ -105,6 +107,7 @@ def process_task_input(message):
             f"❌ Ошибка: {str(e)}"
         )
 
+# Функция вывода всех задач
 @bot.message_handler(func=lambda message: message.text == '📝 Список задач')
 def show_tasks(message):
     try:
@@ -179,7 +182,7 @@ def show_tasks(message):
             bot.send_message(message.chat.id, "📭 Список задач пуст!")
             return
 
-        # Отправляем частями если сообщение слишком длинное
+        #Отправляем частями если сообщение слишком длинное
         full_response = "\n".join(response)
         if len(full_response) > 4096:
             for x in range(0, len(full_response), 4096):
@@ -190,6 +193,7 @@ def show_tasks(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
 
+# Функция редактирования задачи
 @bot.message_handler(func=lambda message: message.text == '✏️ Редактировать задачу')
 def edit_task_prompt(message):
     msg = bot.send_message(message.chat.id, "Введите ID задачи для редактирования:")
@@ -207,14 +211,13 @@ def process_edit_text(message, task_id):
     try:
         # new_text = message.text.strip()
         new_text, new_deadline_str = message.text.split(' / ', 1)
-        deadline = parser.parse(new_deadline_str)  # Парсим дату из строки
         if new_deadline_str == "#":
             result = tasks_collection.update_one(
                 {'_id': task_id, 'user_id': message.chat.id},
                 {'$set': {'text': new_text}}
             )
         else:
-            deadline = datetime.strptime(new_deadline_str, '%d.%m.%Y %H:%M') # Парсим дату из строки  
+            deadline = datetime.strptime(new_deadline_str, '%d.%m.%Y %H:%M')
             if deadline < datetime.now():
                 raise ValueError("Дата не может быть в прошлом!")
             if new_text == "#":
@@ -237,6 +240,7 @@ def process_edit_text(message, task_id):
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
 
+# Функция изменения статуса
 @bot.message_handler(func=lambda message: message.text == '✅ Изменить статус')
 def toggle_status_prompt(message):
     msg = bot.send_message(message.chat.id, "Введите ID задачи для изменения статуса:")
@@ -263,7 +267,7 @@ def process_toggle_status(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
 
-
+# Функция удаления задачи по дате
 @bot.message_handler(func=lambda message: message.text == '❌ Удалить задачу')
 def delete_task(message):
     msg = bot.send_message(
@@ -296,16 +300,17 @@ def process_delete_input(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
 
+# Функция продления дедлайна
 def prolong_deadlines():
     now = datetime.now()
-    overdue_tasks = tasks_collection.find({'deadline' : {'$lt' : now}, 'is_completed' : False})
+    overdue_tasks = tasks_collection.find({'deadline' : {'$lt' : now}, 'is_completed' : False, 'is_prolonged' : False})
 
     # Продлеваем срок задачи на 1 день
     for task in overdue_tasks:
-        new_deadline = task['deadline'] + timedelta(days = 1)
+        new_deadline = task['deadline'] + timedelta(days=1)
         tasks_collection.update_one(
             {'_id' : task['_id']},
-            {'$set' : {'deadline' : new_deadline}}
+            {'$set' : {'deadline' : new_deadline, 'is_prolonged' : True}}
         )
         # Уведомляем пользователя
         bot.send_message(
@@ -313,9 +318,38 @@ def prolong_deadlines():
             f"⏳ Срок задачи '{task['text']}' истек. Дедлайн был автоматически продлен на 1 день.\n"
             f"Новый дедлайн: {new_deadline.strftime('%d.%m.%Y %H:%M')}"
         )
-    # Запускаем проверку снова через 1 час
+
+    # Запускаем проверку снова через 1 минуту
     Timer(60, prolong_deadlines).start()
+
 # Запускаем проверку при старте бота
 prolong_deadlines()
+
+# Функция напоминаний пользователю
+def reminder():
+    now = datetime.now()
+    active_tasks = tasks_collection.find({'deadline' : {'$gt' : now}, 'is_completed' : False})
+    
+    for task in active_tasks:
+        time_difference = task['deadline'] - now
+
+        # Проверяем, что до дедлайна остался 1 день и уведомляем пользователя об этом
+        if timedelta(days=1) - timedelta(seconds=30) <= time_difference <= timedelta(days=1) + timedelta(seconds=30):
+            bot.send_message(
+                task['user_id'],
+                f"⏳ До наступления дедлайна задачи '{task['text']}' остался 1 день"
+            )
+        # Проверяем, что до дедлайна остался 1 час и уведомляем пользователя об этом
+        if timedelta(hours=1) - timedelta(seconds=30) <= time_difference <= timedelta(hours=1) + timedelta(seconds=30):
+            bot.send_message(
+                task['user_id'],
+                f"⏳ До наступления дедлайна задачи '{task['text']}' остался 1 час"
+            )
+
+       # Запускаем проверку снова через 1 минуту
+    Timer(60, reminder).start()
+
+# Запускаем проверку при старте бота
+reminder()
 
 bot.polling()
